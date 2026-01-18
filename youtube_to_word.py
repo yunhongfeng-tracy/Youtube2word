@@ -3,6 +3,7 @@
 
 Usage:
   python youtube_to_word.py --url <youtube_url> --output output.docx
+  python youtube_to_word.py --url <youtube_url> --output output.docx --download-dir downloads --download-video
 
 Dependencies:
   pip install yt-dlp openai-whisper python-docx
@@ -14,7 +15,6 @@ Notes:
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import shutil
 import tempfile
@@ -28,7 +28,7 @@ from yt_dlp import YoutubeDL
 SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
 
-def download_audio(url: str, output_dir: Path) -> Path:
+def download_audio(url: str, output_dir: Path) -> tuple[Path, str]:
     output_template = str(output_dir / "audio.%(ext)s")
     ydl_opts = {
         "format": "bestaudio/best",
@@ -50,6 +50,23 @@ def download_audio(url: str, output_dir: Path) -> Path:
     if not audio_path.exists():
         raise FileNotFoundError("Failed to download audio from the YouTube URL.")
     return audio_path, title
+
+
+def download_video(url: str, output_dir: Path) -> Path:
+    output_template = str(output_dir / "video.%(ext)s")
+    ydl_opts = {
+        "format": "bestvideo+bestaudio/best",
+        "outtmpl": output_template,
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        ydl.extract_info(url, download=True)
+    mp4_path = output_dir / "video.mp4"
+    if not mp4_path.exists():
+        raise FileNotFoundError("Failed to download video from the YouTube URL.")
+    return mp4_path
 
 
 def transcribe_audio(audio_path: Path, model_name: str) -> str:
@@ -91,6 +108,15 @@ def parse_args() -> argparse.Namespace:
         help="Output .docx path",
     )
     parser.add_argument(
+        "--download-dir",
+        help="Optional directory to keep downloaded media",
+    )
+    parser.add_argument(
+        "--download-video",
+        action="store_true",
+        help="Download the source video as an MP4 to --download-dir",
+    )
+    parser.add_argument(
         "--model",
         default="base",
         help="Whisper model name (tiny, base, small, medium, large)",
@@ -113,14 +139,30 @@ def main() -> None:
     if not shutil.which("ffmpeg"):
         raise EnvironmentError("ffmpeg is required and must be on PATH.")
 
+    download_dir = None
+    if args.download_dir:
+        download_dir = Path(args.download_dir).expanduser().resolve()
+        download_dir.mkdir(parents=True, exist_ok=True)
+    elif args.download_video:
+        raise ValueError("--download-video requires --download-dir")
+
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         audio_path, title = download_audio(args.url, temp_path)
         transcript = transcribe_audio(audio_path, args.model)
+        if download_dir:
+            saved_audio = download_dir / "audio.mp3"
+            shutil.copy2(audio_path, saved_audio)
+            if args.download_video:
+                download_video(args.url, download_dir)
 
     paragraphs = chunk_sentences(transcript, args.sentences)
     write_docx(title, paragraphs, output_path)
     print(f"Saved Word document to: {output_path}")
+    if download_dir:
+        print(f"Saved audio to: {download_dir / 'audio.mp3'}")
+        if args.download_video:
+            print(f"Saved video to: {download_dir / 'video.mp4'}")
 
 
 if __name__ == "__main__":
